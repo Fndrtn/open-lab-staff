@@ -3,5 +3,7 @@ name = "opensource-laba-staff"
 version = "0.1.0"
 requires-python = ">=3.13"
 dependencies = [
+    "pwdlib[argon2]>=0.4.2",
+    "pydantic[email]>=2.14.4",
     "sqlalchemy>=2.1.9",
 ]
