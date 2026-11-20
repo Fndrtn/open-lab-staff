@@ -7,3 +7,16 @@ dependencies = [
     "pydantic[email]>=2.14.4",
     "sqlalchemy>=2.1.9",
 ]
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["auth_system*"]
+
+[tool.ruff]
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]

@@ -1,0 +1,232 @@
+name: Repository CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  UV_PYTHON: "3.13"
+
+jobs:
+  quality:
+    name: Code quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.3
+        with:
+          version: "0.13.7"
+          enable-cache: true
+
+      - name: Install Python and project dependencies
+        run: |
+          uv python install "$UV_PYTHON"
+          uv sync --frozen
+
+      - name: Run Ruff
+        id: ruff
+        run: |
+          mkdir -p analysis-results
+          uv tool run --from ruff==0.17.5 ruff check \
+            auth_system backup_database \
+            --output-format github 2>&1 | tee analysis-results/ruff.txt
+
+      - name: Check Python syntax
+        id: syntax
+        run: |
+          uv run --frozen python -m compileall -q auth_system backup_database
+          echo "Python syntax check: passed" | tee analysis-results/syntax.txt
+
+      - name: Upload analysis reports
+        id: reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: analysis-reports
+          path: analysis-results/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Write analysis summary
+        if: always()
+        env:
+          RUFF_RESULT: ${{ steps.ruff.outcome }}
+          SYNTAX_RESULT: ${{ steps.syntax.outcome }}
+          REPORT_URL: ${{ steps.reports.outputs.artifact-url }}
+        run: |
+          {
+            echo "## Проверка кода"
+            echo
+            echo "- Ruff: $RUFF_RESULT"
+            echo "- Синтаксис Python: $SYNTAX_RESULT"
+            if [ -n "$REPORT_URL" ]; then
+              echo
+              echo "[Скачать отчёты]($REPORT_URL)"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  tests:
+    name: Smoke tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.3
+        with:
+          version: "0.13.7"
+          enable-cache: true
+
+      - name: Install Python and project dependencies
+        run: |
+          uv python install "$UV_PYTHON"
+          uv sync --frozen
+
+      - name: Run authentication smoke tests
+        id: smoke
+        run: |
+          mkdir -p test-results
+          uv run --frozen python - <<'PY' 2>&1 | tee test-results/smoke-tests.txt
+          import unittest
+
+          from auth_system.utils.captcha import create_captcha, verify_captcha
+          from auth_system.utils.hash import PasswordHasher
+
+
+          class AuthSystemTests(unittest.TestCase):
+              def test_captcha_is_single_use(self) -> None:
+                  captcha_id, answer = create_captcha()
+                  self.assertTrue(verify_captcha(captcha_id, answer))
+                  self.assertFalse(verify_captcha(captcha_id, answer))
+
+              def test_password_hash(self) -> None:
+                  hasher = PasswordHasher()
+                  password_hash = hasher.hash_password("secret-password")
+                  self.assertTrue(
+                      hasher.check_password("secret-password", password_hash)
+                  )
+                  self.assertFalse(
+                      hasher.check_password("wrong-password", password_hash)
+                  )
+
+
+          unittest.main(verbosity=2)
+          PY
+
+      - name: Upload test report
+        id: reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-reports
+          path: test-results/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Write test summary
+        if: always()
+        env:
+          TEST_RESULT: ${{ steps.smoke.outcome }}
+          REPORT_URL: ${{ steps.reports.outputs.artifact-url }}
+        run: |
+          {
+            echo "## Smoke-тесты"
+            echo
+            echo "Результат: $TEST_RESULT"
+            if [ -n "$REPORT_URL" ]; then
+              echo
+              echo "[Скачать отчёт]($REPORT_URL)"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: Build package
+    needs: [quality, tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.3
+        with:
+          version: "0.13.7"
+          enable-cache: true
+
+      - name: Install Python
+        run: uv python install "$UV_PYTHON"
+
+      - name: Build wheel and source archive
+        id: build
+        run: uv build
+
+      - name: Verify installed wheel
+        id: smoke
+        run: |
+          uv venv --python "$UV_PYTHON" "$RUNNER_TEMP/wheel-check"
+          uv pip install \
+            --python "$RUNNER_TEMP/wheel-check/bin/python" \
+            dist/*.whl
+          "$RUNNER_TEMP/wheel-check/bin/python" -I - <<'PY'
+          from auth_system.utils.captcha import create_captcha, verify_captcha
+          from auth_system.utils.hash import PasswordHasher
+
+          captcha_id, answer = create_captcha()
+          assert verify_captcha(captcha_id, answer)
+
+          hasher = PasswordHasher()
+          password_hash = hasher.hash_password("ci-secret")
+          assert hasher.check_password("ci-secret", password_hash)
+
+          print("Installed wheel smoke test: passed")
+          PY
+
+      - name: Upload packages
+        id: packages
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: python-packages
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Write build summary
+        if: always()
+        env:
+          BUILD_RESULT: ${{ steps.build.outcome }}
+          SMOKE_RESULT: ${{ steps.smoke.outcome }}
+          PACKAGE_URL: ${{ steps.packages.outputs.artifact-url }}
+        run: |
+          {
+            echo "## Сборка пакета"
+            echo
+            echo "- Wheel и исходный архив: $BUILD_RESULT"
+            echo "- Проверка установленного wheel: $SMOKE_RESULT"
+            if [ -n "$PACKAGE_URL" ]; then
+              echo
+              echo "[Скачать пакеты]($PACKAGE_URL)"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
