@@ -1,0 +1,122 @@
+name: Auth system CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Lint and test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install application
+        run: |
+          python -m pip install .
+          python -m pip install ruff==0.17.5
+
+      - name: Run Ruff
+        run: ruff check auth_system --output-format=concise | tee ruff-report.txt
+
+      - name: Check Python syntax
+        run: |
+          python -m compileall -q auth_system
+          echo "Python syntax check: passed" | tee syntax-report.txt
+
+      - name: Run smoke tests
+        run: |
+          python - <<'PY' 2>&1 | tee test-report.txt
+          import unittest
+
+          from auth_system.utils.captcha import create_captcha, verify_captcha
+          from auth_system.utils.hash import PasswordHasher
+
+
+          class AuthSystemTests(unittest.TestCase):
+              def test_captcha(self):
+                  captcha_id, answer = create_captcha()
+                  self.assertTrue(verify_captcha(captcha_id, answer))
+
+              def test_password_hash(self):
+                  hasher = PasswordHasher()
+                  password_hash = hasher.hash_password("secret-password")
+                  self.assertTrue(hasher.check_password("secret-password", password_hash))
+                  self.assertFalse(hasher.check_password("wrong-password", password_hash))
+
+
+          unittest.main(verbosity=2)
+          PY
+
+      - name: Upload check reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: auth-system-check-reports
+          path: |
+            ruff-report.txt
+            syntax-report.txt
+            test-report.txt
+          if-no-files-found: warn
+
+  package:
+    name: Package application
+    needs: quality
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Create ZIP archive
+        run: |
+          zip -r auth-system.zip auth_system pyproject.toml uv.lock \
+            -x "auth_system/auth.db" "*/__pycache__/*" "*.pyc"
+
+      - name: Upload application package
+        uses: actions/upload-artifact@v4
+        with:
+          name: auth-system-package
+          path: auth-system.zip
+          if-no-files-found: error
+
+  report:
+    name: Build report
+    if: always()
+    needs: [quality, package]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Write workflow summary
+        env:
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          PACKAGE_RESULT: ${{ needs.package.result }}
+        run: |
+          {
+            echo "# Auth system CI report"
+            echo
+            echo "| Stage | Result |"
+            echo "| --- | --- |"
+            echo "| Ruff, syntax and tests | ${QUALITY_RESULT} |"
+            echo "| Application package | ${PACKAGE_RESULT} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ "$QUALITY_RESULT" != "success" || "$PACKAGE_RESULT" != "success" ]]; then
+            echo "::error::Auth system CI pipeline failed"
+            exit 1
+          fi
+
+          echo "::notice::Auth system CI pipeline completed successfully"

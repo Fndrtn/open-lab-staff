@@ -1,7 +1,6 @@
-from pydantic import BaseModel, EmailStr, ValidationError
-
 from db.config import init_db, session_factory
 from db.user_repository import UserRepository
+from pydantic import BaseModel, EmailStr, ValidationError
 from utils.captcha import create_captcha, verify_captcha
 
 
